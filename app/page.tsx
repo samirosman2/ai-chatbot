@@ -8,6 +8,7 @@ import EditableTitle from '@/components/EditableTitle';
 import ChatSearch from '@/components/ChatSearch';
 import { Session } from '@supabase/supabase-js';
 import Image from 'next/image';
+import { v4 as uuidv4 } from 'uuid';
 import { getAIResponse, generateChatTitle } from '@/lib/ai-service';
 
 interface Message {
@@ -112,14 +113,21 @@ export default function Home() {
   }
 
   async function getProfile(userId: string) {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('avatar_url, first_name, last_name')
-      .eq('id', userId)
-      .single();
-    
-    if (!error && data) {
-      setProfile(data);
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('avatar_url, first_name, last_name')
+        .eq('id', userId)
+        .single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        setProfile(data);
+        console.log('Profile loaded:', data);
+      }
+    } catch (error) {
+      console.error('Error loading profile:', error);
     }
   }
 
@@ -142,33 +150,16 @@ export default function Home() {
     }
   }
 
-  async function saveMessage(userId: string, chatId: string, content: string, role: 'user' | 'assistant') {
-    if (!content) return;
-
-    try {
-      const { error } = await supabase
-        .from('messages')
-        .insert({
-          user_id: userId,
-          chat_id: chatId,
-          content,
-          role,
-        });
-
-      if (error) throw error;
-    } catch (error) {
-      console.error('Error saving message:', error);
-    }
-  }
-
   const handleNewChat = async () => {
     if (!session?.user.id) return;
 
     try {
+      const newChatId = uuidv4();
       const { data, error } = await supabase
         .from('chats')
         .insert([
           { 
+            id: newChatId,
             user_id: session.user.id,
             title: 'New Chat',
             created_at: new Date().toISOString(),
@@ -196,6 +187,38 @@ export default function Home() {
     }
   };
 
+  // Delete chat functionality
+  const handleDeleteChat = async (chatId: string) => {
+    if (!session?.user.id) return;
+
+    try {
+      const { error } = await supabase
+        .from('chats')
+        .delete()
+        .eq('id', chatId);
+
+      if (error) throw error;
+
+      // Update local state
+      setChats(prevChats => prevChats.filter(chat => chat.id !== chatId));
+      
+      // Handle current chat state
+      if (currentChatId === chatId) {
+        if (chats.length > 1) {
+          const nextChat = chats.find(chat => chat.id !== chatId);
+          if (nextChat) {
+            setCurrentChatId(nextChat.id);
+            loadMessages(session.user.id, nextChat.id);
+          }
+        } else {
+          handleNewChat();
+        }
+      }
+    } catch (error) {
+      console.error('Error deleting chat:', error);
+    }
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputMessage.trim() || isLoading || !session?.user.id || !currentChatId) return;
@@ -204,7 +227,16 @@ export default function Home() {
       setIsLoading(true);
       
       const userMessage = inputMessage;
-      await saveMessage(session.user.id, currentChatId, userMessage, 'user');
+      const { error: userMessageError } = await supabase
+        .from('messages')
+        .insert({
+          user_id: session.user.id,
+          chat_id: currentChatId,
+          content: userMessage,
+          role: 'user',
+        });
+
+      if (userMessageError) throw userMessageError;
 
       // Generate title for new chats
       if (messages.length === 0) {
@@ -224,7 +256,17 @@ export default function Home() {
 
       const aiResponse = await getAIResponse(userMessage);
       if (aiResponse) {
-        await saveMessage(session.user.id, currentChatId, aiResponse, 'assistant');
+        const { error: aiMessageError } = await supabase
+          .from('messages')
+          .insert({
+            user_id: session.user.id,
+            chat_id: currentChatId,
+            content: aiResponse,
+            role: 'assistant',
+          });
+
+        if (aiMessageError) throw aiMessageError;
+
         setMessages(prev => [...prev, { 
           id: Date.now() + 1, 
           content: aiResponse, 
@@ -247,9 +289,9 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-screen bg-gray-100">
+    <div className="grid grid-cols-[256px_1fr] h-screen bg-gray-100">
       {/* Sidebar */}
-      <div className="chat-sidebar">
+      <div className="chat-sidebar overflow-hidden flex flex-col bg-gray-900">
         <button 
           onClick={handleNewChat}
           className="w-full mb-4 bg-gray-700 hover:bg-gray-600 text-white p-3 rounded-lg flex items-center justify-center gap-2"
@@ -267,17 +309,32 @@ export default function Home() {
             filteredChats.map((chat) => (
               <div
                 key={chat.id}
-                onClick={() => handleSelectChat(chat.id)}
-                className={`chat-item ${
+                className={`chat-item group relative ${
                   currentChatId === chat.id
                     ? 'bg-gray-700 text-white'
                     : 'text-gray-300 hover:bg-gray-800'
                 }`}
               >
-                <EditableTitle
-                  title={chat.title}
-                  onSave={(newTitle) => handleUpdateChatTitle(chat.id, newTitle)}
-                />
+                <div className="flex justify-between items-center">
+                  <div 
+                    onClick={() => handleSelectChat(chat.id)}
+                    className="flex-grow cursor-pointer"
+                  >
+                    <EditableTitle
+                      title={chat.title}
+                      onSave={(newTitle) => handleUpdateChatTitle(chat.id, newTitle)}
+                    />
+                  </div>
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteChat(chat.id);
+                    }}
+                    className="text-red-500 hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
               </div>
             ))
           )}
@@ -285,7 +342,7 @@ export default function Home() {
       </div>
 
       {/* Main Chat Area */}
-      <main className="flex-1 flex flex-col max-w-5xl mx-auto bg-white">
+      <main className="flex flex-col bg-white overflow-hidden">
         <div className="bg-white shadow-sm p-4 flex justify-between items-center">
           <h1 className="text-xl font-semibold text-gray-800">
             {currentChatId ? chats.find(c => c.id === currentChatId)?.title : 'My Smart AI Assistant'}
